@@ -153,6 +153,55 @@ struct RenderParams: Equatable {
         0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
     }
 
+    /// Rotate the mesh palette one step clockwise around the 4×4 grid. The outer ring
+    /// (12 cells) and inner ring (4 cells) each rotate by one — after 12 calls the grid
+    /// returns to its starting arrangement (LCM of ring periods 12 and 4).
+    mutating func cycleMeshClockwise() {
+        // Index layout (row 0 = bottom, row 3 = top):
+        //   12 13 14 15
+        //    8  9 10 11
+        //    4  5  6  7
+        //    0  1  2  3
+        //
+        // Clockwise from top-left: top row L→R, right col top→bottom,
+        // bottom row R→L, left col bottom→top.
+        let outer: [Int] = [12, 13, 14, 15, 11, 7, 3, 2, 1, 0, 4, 8]
+        let inner: [Int] = [9, 10, 6, 5]
+        rotateMeshColors(along: outer)
+        rotateMeshColors(along: inner)
+    }
+
+    private mutating func rotateMeshColors(along indices: [Int]) {
+        guard indices.count > 1 else { return }
+        let last = meshPoints[indices.last!].color
+        for i in stride(from: indices.count - 1, through: 1, by: -1) {
+            meshPoints[indices[i]].color = meshPoints[indices[i - 1]].color
+        }
+        meshPoints[indices[0]].color = last
+    }
+
+    /// Set the leftmost and rightmost grid columns to black.
+    mutating func blackoutMeshSides() {
+        let black = SIMD4<Float>(0, 0, 0, 1)
+        let w = GradientRendererLimits.meshGridWidth
+        let h = GradientRendererLimits.meshGridHeight
+        for row in 0..<h {
+            meshPoints[row * w + 0].color = black
+            meshPoints[row * w + (w - 1)].color = black
+        }
+    }
+
+    /// Set the top and bottom grid rows to black.
+    mutating func blackoutMeshTopBottom() {
+        let black = SIMD4<Float>(0, 0, 0, 1)
+        let w = GradientRendererLimits.meshGridWidth
+        let h = GradientRendererLimits.meshGridHeight
+        for col in 0..<w {
+            meshPoints[0 * w + col].color = black
+            meshPoints[(h - 1) * w + col].color = black
+        }
+    }
+
     mutating func reseedMeshPoints() {
         let baseHue = Float.random(in: 0...(.pi * 2))
         let palette = ColorHarmony.palette(count: GradientRendererLimits.meshVertexCount,
