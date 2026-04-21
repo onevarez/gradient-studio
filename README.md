@@ -1,6 +1,10 @@
 # GradientStudio
 
+<img width="2592" height="1268" alt="image" src="https://github.com/user-attachments/assets/c35471af-7c2d-410a-a5ce-5173cf2fc69a" />
+
+
 macOS POC for crafting and exporting animated gradient videos. Pure Swift + Metal + SwiftUI + AVFoundation. No third-party dependencies; all licensing is Apple-SDK-only.
+
 
 ## Requirements
 
