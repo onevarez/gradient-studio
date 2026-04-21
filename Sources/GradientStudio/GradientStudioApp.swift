@@ -33,8 +33,11 @@ struct GradientStudioApp: App {
             outputURL: URL(fileURLWithPath: path)
         )
 
+        // Semaphore-synchronized box. The detached Task writes before sem.signal(),
+        // and we only read after sem.wait(), so the unchecked Sendable is sound.
+        final class ErrorBox: @unchecked Sendable { var error: Error? }
+        let box = ErrorBox()
         let sem = DispatchSemaphore(value: 0)
-        var failure: Error?
 
         Task.detached {
             do {
@@ -44,13 +47,13 @@ struct GradientStudioApp: App {
                     }
                 }
             } catch {
-                failure = error
+                box.error = error
             }
             sem.signal()
         }
         sem.wait()
 
-        if let failure {
+        if let failure = box.error {
             fputs("export failed: \(failure.localizedDescription)\n", stderr)
             exit(2)
         }
