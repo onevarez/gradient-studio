@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag (e.g. v0.1.0). Used for the zip name and — when publish=true — the Release title.'
+        required: true
+        default: 'v0.0.0-dryrun'
+      publish:
+        description: 'Publish a GitHub Release (leave unchecked for artifact-only dry run)'
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    name: Build and release
+    runs-on: macos-14
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log toolchain
+        run: |
+          sw_vers
+          xcode-select -p
+          swift --version
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          else
+            tag="${{ inputs.version }}"
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build app bundle
+        run: Scripts/make-app-bundle.sh "${{ steps.version.outputs.tag }}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GradientStudio-${{ steps.version.outputs.tag }}
+          path: dist/GradientStudio-${{ steps.version.outputs.tag }}.zip
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.tag }}"
+          NOTES_FILE="$(mktemp)"
+          cat > "$NOTES_FILE" <<EOF
+          ## GradientStudio ${VERSION}
+
+          Universal macOS build (Apple Silicon + Intel). Requires macOS 14 (Sonoma) or later.
+
+          ### Install
+
+          1. Download \`GradientStudio-${VERSION}.zip\` below and unzip.
+          2. Move **GradientStudio.app** to **/Applications**.
+          3. The app is **unsigned**, so Gatekeeper blocks it on first launch. Pick one:
+             - Right-click **GradientStudio.app** → **Open** → **Open**, or
+             - Run this in Terminal to clear the quarantine flag:
+               \`\`\`sh
+               xattr -dr com.apple.quarantine /Applications/GradientStudio.app
+               \`\`\`
+          EOF
+
+          gh release create "$VERSION" \
+            --title "GradientStudio $VERSION" \
+            --notes-file "$NOTES_FILE" \
+            "dist/GradientStudio-${VERSION}.zip"

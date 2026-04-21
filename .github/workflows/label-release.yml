@@ -1,0 +1,69 @@
+name: Release on labeled PR
+
+on:
+  pull_request:
+    types: [closed]
+
+# Only one release workflow at a time.
+concurrency:
+  group: release-tagging
+  cancel-in-progress: false
+
+jobs:
+  tag-and-dispatch:
+    name: Tag from conventional commits and dispatch release
+    if: |
+      github.event.pull_request.merged == true &&
+      contains(github.event.pull_request.labels.*.name, 'release')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the tag
+      actions: write    # dispatch release.yml
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Check out the PR's merge commit so the version computation sees the
+          # exact state being released, not whatever has landed on main since.
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Compute next version
+        id: next
+        run: |
+          set -euo pipefail
+          TAG="$(Scripts/compute-next-version.sh)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::Tag $TAG already exists"
+            exit 1
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Dispatch release workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          gh workflow run release.yml \
+            --ref "$TAG" \
+            -f version="$TAG" \
+            -f publish=true
+
+      - name: Summary
+        run: |
+          echo "### Release dispatched" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Tag: \`${{ steps.next.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Merge SHA: \`${{ github.event.pull_request.merge_commit_sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- PR: #${{ github.event.pull_request.number }}" >> "$GITHUB_STEP_SUMMARY"
