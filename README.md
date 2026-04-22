@@ -17,21 +17,37 @@ macOS POC for crafting and exporting animated gradient videos. Pure Swift + Meta
 swift run
 ```
 
-The first run compiles the Metal shader into `default.metallib` and drops you into a window with a live-animated gradient preview on the left and sliders on the right. Click **Export…** in the toolbar to render an MP4.
+Opens a window with a live-animated gradient preview on the left and a layer stack on the right. The Metal source lives in `Shaders.swift` as a Swift string literal and is compiled at runtime via `MTLDevice.makeLibrary(source:)` — no `.metallib` build step. Toolbar: **Undo / Redo**, **Copy Preset**, **Paste Preset**, **Export…**.
+
+## Features
+
+- **Composable layer stack.** Add, remove, duplicate, drag-to-reorder, and toggle layers. Multiple layers of the same kind are allowed; the renderer walks the list in order.
+- **Four layer kinds.** Linear gradient, Mesh, Wave distortion, Glass. Post-fx (grain, vignette) is a scene-wide pass that runs last.
+- **Undo / redo** over all parameter changes (`⌘Z` / `⇧⌘Z`), coalesced by a short idle window so slider drags collapse into one checkpoint.
+- **Preset clipboard.** `⇧⌘C` copies the scene as JSON; `⇧⌘V` applies one from the clipboard. v1 presets (pre-composable-layers) are auto-upgraded on paste.
+- **Image palette extraction.** Pick an image; k-means extracts a palette and pushes it into each Mesh layer.
+- **Randomize** (`⌘R`) and per-layer actions (reseed, cycle colors, blackout rows/columns).
+- **Aspect-ratio preview** (free / 16:9 / 9:16 / 1:1 / 4:5) in the preview toolbar.
 
 ## Project layout
 
 ```
 Sources/GradientStudio/
-├── GradientStudioApp.swift       # @main
-├── ContentView.swift             # split view shell
-├── Shaders.metal                 # all layer math (single composite pass)
-├── Render/                       # GradientRenderer, RenderParams
+├── GradientStudioApp.swift       # @main + headless export entry point
+├── ContentView.swift             # split view shell + toolbar
+├── Shaders.swift                 # Metal source as a Swift string literal
+├── Render/                       # GradientRenderer, Layer, RenderParams, ColorHarmony
 ├── Preview/                      # MTKView bridge + frame pump
-├── Controls/                     # per-layer SwiftUI controls
+├── Controls/                     # per-layer SwiftUI controls + layer list
+├── Preset/                       # versioned JSON preset + pasteboard I/O
+├── Palette/                      # k-means palette extraction from images
 ├── Export/                       # AVAssetWriter pipeline + sheet
-└── State/                        # @Observable AppState
+└── State/                        # @Observable AppState (undo/redo, checkpoints)
 ```
+
+## Rendering
+
+Multi-pass pipeline with `rgba16Float` ping-pong intermediates. Each layer kind is its own fragment function with its own typed uniform struct; the renderer iterates `params.layers` in order, skipping disabled entries, and writes the final result through a PostFx pass into the app-facing `bgra8Unorm` target. Each layer gets its own uniform buffer from a per-kind pool, grown lazily — so multiple layers of the same kind don't stomp each other's uniforms within a single command buffer.
 
 ## Export
 
@@ -118,4 +134,4 @@ xattr -dr com.apple.quarantine /Applications/GradientStudio.app
 
 ## Status
 
-v1 scope: one composed scene with four layers (Linear → WaveDistortion → Mesh → Glass), sliders per layer, export button. See plan for out-of-scope items.
+POC / personal playground. The composable layer pipeline (v2 presets) is the current target surface. The smoke-test harness is the only regression check — there's no unit test suite.
