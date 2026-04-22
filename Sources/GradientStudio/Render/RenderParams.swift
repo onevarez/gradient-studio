@@ -1,34 +1,57 @@
 import Foundation
 import simd
 
-// Memory layout MUST match `Uniforms` in Shaders.swift.
-struct Uniforms {
-    var resolution: SIMD2<Float>
+// Per-pass uniform structs. Memory layout MUST match the corresponding struct
+// in Shaders.swift. Each layer's fragment function reads one of these. Any field
+// reorder or new field requires a coordinated edit on both sides.
+
+struct LinearUniforms {
+    var colorA: SIMD4<Float>
+    var colorB: SIMD4<Float>
+    var angle: Float
+    var rotationSpeed: Float
     var loopPhase: Float
-    var meshPointCount: Int32
-    var lgColorA: SIMD4<Float>
-    var lgColorB: SIMD4<Float>
-    var lgAngle: Float
-    var lgRotationSpeed: Float
-    var waveAmplitude: Float
-    var waveFrequency: Float
-    var waveSpeed: Float
-    var meshDriftSpeed: Float
-    var meshOpacity: Float
-    var glassAberration: Float
-    var glassBlurRadius: Float
-    var glassEnabled: Int32
+    var loopDuration: Float
+}
+
+struct WaveUniforms {
+    var amplitude: Float
+    var frequency: Float
+    var speed: Float
+    var loopPhase: Float
+    var loopDuration: Float
     var _pad0: Float = 0
     var _pad1: Float = 0
+    var _pad2: Float = 0
+}
+
+struct MeshUniforms {
+    var smokeColor: SIMD4<Float>
+    var opacity: Float
+    var driftSpeed: Float
+    var loopPhase: Float
+    var loopDuration: Float
+    var pointCount: Int32
+    var style: Int32               // 0 grid, 1 blobs, 2 smoke
+    var _pad0: Float = 0
+    var _pad1: Float = 0
+}
+
+struct GlassUniforms {
+    var aberration: Float
+    var blurRadius: Float
+    var enabled: Int32
+    var _pad0: Float = 0
+}
+
+struct PostFxUniforms {
+    var resolution: SIMD2<Float>
+    var loopPhase: Float
     var grainAmount: Float
     var vignetteAmount: Float
-    var meshStyle: Int32        // 0 = grid, 1 = blobs
-    var _pad2: Float = 0
-    var loopDuration: Float
     var loopFrames: Int32
-    var _pad3: Float = 0
-    var _pad4: Float = 0
-    var smokeColor: SIMD4<Float>
+    var _pad0: Float = 0
+    var _pad1: Float = 0
 }
 
 enum MeshStyle: Int32 {
@@ -72,35 +95,154 @@ struct MeshPointParams: Equatable, Identifiable {
     }
 }
 
+// MARK: - RenderParams
+
+// Canonical storage is `layers: [LayerEntry]` + `globals: Globals`. The flat
+// `lg*`, `wave*`, `mesh*`, `glass*`, and post-fx properties below are computed
+// projections over the layer list — the UI, preset, shader-uniform builder, and
+// export path all continue to use them unchanged.
+//
+// Invariant: `layers` contains exactly one entry of each kind. Order and
+// per-entry `enabled` are user-editable (reorder + toggle). Later phases will
+// relax "exactly one of each kind" to support add / duplicate / remove.
 struct RenderParams: Equatable {
+    var layers: [LayerEntry]
+    var globals: Globals
+
+    // MARK: - Typed layer accessors
+    //
+    // These locate the first entry of each kind and read/write via the enum case.
+    // `preconditionFailure` guards the invariant — the code paths that build
+    // `RenderParams` (default, randomize, preset.apply, undo/redo) all produce
+    // four-entry arrays with exactly one of each kind.
+
+    private var linear: LinearParams {
+        get {
+            for entry in layers { if case .linear(let p) = entry.layer { return p } }
+            preconditionFailure("RenderParams has no linear layer")
+        }
+        set {
+            for i in layers.indices {
+                if case .linear = layers[i].layer { layers[i].layer = .linear(newValue); return }
+            }
+            preconditionFailure("RenderParams has no linear layer")
+        }
+    }
+
+    private var wave: WaveParams {
+        get {
+            for entry in layers { if case .wave(let p) = entry.layer { return p } }
+            preconditionFailure("RenderParams has no wave layer")
+        }
+        set {
+            for i in layers.indices {
+                if case .wave = layers[i].layer { layers[i].layer = .wave(newValue); return }
+            }
+            preconditionFailure("RenderParams has no wave layer")
+        }
+    }
+
+    private var mesh: MeshParams {
+        get {
+            for entry in layers { if case .mesh(let p) = entry.layer { return p } }
+            preconditionFailure("RenderParams has no mesh layer")
+        }
+        set {
+            for i in layers.indices {
+                if case .mesh = layers[i].layer { layers[i].layer = .mesh(newValue); return }
+            }
+            preconditionFailure("RenderParams has no mesh layer")
+        }
+    }
+
+    private var glass: GlassParams {
+        get {
+            for entry in layers { if case .glass(let p) = entry.layer { return p } }
+            preconditionFailure("RenderParams has no glass layer")
+        }
+        set {
+            for i in layers.indices {
+                if case .glass = layers[i].layer { layers[i].layer = .glass(newValue); return }
+            }
+            preconditionFailure("RenderParams has no glass layer")
+        }
+    }
+
+    // MARK: - Layer reorder
+
+    /// Move the layer identified by `id` up (`delta = -1`) or down (`delta = +1`)
+    /// in the render order. No-op if the move would fall outside the array.
+    mutating func moveLayer(id: LayerEntry.ID, by delta: Int) {
+        guard let i = layers.firstIndex(where: { $0.id == id }) else { return }
+        let j = i + delta
+        guard j >= 0 && j < layers.count else { return }
+        layers.swapAt(i, j)
+    }
+
+    // MARK: - Flat computed projections (back-compat surface)
+
     // Linear
-    var lgColorA: SIMD4<Float>
-    var lgColorB: SIMD4<Float>
-    var lgAngle: Float                // radians
-    var lgRotationSpeed: Float        // rad/sec
+    var lgColorA: SIMD4<Float> {
+        get { linear.colorA } set { linear.colorA = newValue }
+    }
+    var lgColorB: SIMD4<Float> {
+        get { linear.colorB } set { linear.colorB = newValue }
+    }
+    var lgAngle: Float {
+        get { linear.angle } set { linear.angle = newValue }
+    }
+    var lgRotationSpeed: Float {
+        get { linear.rotationSpeed } set { linear.rotationSpeed = newValue }
+    }
 
     // Wave
-    var waveAmplitude: Float          // uv units, typical 0..0.2
-    var waveFrequency: Float          // noise freq, typical 0..8
-    var waveSpeed: Float               // time scale
+    var waveAmplitude: Float {
+        get { wave.amplitude } set { wave.amplitude = newValue }
+    }
+    var waveFrequency: Float {
+        get { wave.frequency } set { wave.frequency = newValue }
+    }
+    var waveSpeed: Float {
+        get { wave.speed } set { wave.speed = newValue }
+    }
 
     // Mesh
-    var meshOpacity: Float             // 0..1 blend over base
-    var meshDriftSpeed: Float
-    var meshPoints: [MeshPointParams]
+    var meshOpacity: Float {
+        get { mesh.opacity } set { mesh.opacity = newValue }
+    }
+    var meshDriftSpeed: Float {
+        get { mesh.driftSpeed } set { mesh.driftSpeed = newValue }
+    }
+    var meshPoints: [MeshPointParams] {
+        get { mesh.points } set { mesh.points = newValue }
+    }
+    var meshStyle: MeshStyle {
+        get { mesh.style } set { mesh.style = newValue }
+    }
 
     // Glass
-    var glassEnabled: Bool
-    var glassAberration: Float         // 0..1
-    var glassBlurRadius: Float         // 0..1
+    var glassEnabled: Bool {
+        get { glass.enabled } set { glass.enabled = newValue }
+    }
+    var glassAberration: Float {
+        get { glass.aberration } set { glass.aberration = newValue }
+    }
+    var glassBlurRadius: Float {
+        get { glass.blurRadius } set { glass.blurRadius = newValue }
+    }
 
-    // Post / Style
-    var meshStyle: MeshStyle
-    var grainAmount: Float              // 0..0.3
-    var vignetteAmount: Float           // 0..1
+    // Globals
+    var grainAmount: Float {
+        get { globals.grainAmount } set { globals.grainAmount = newValue }
+    }
+    var vignetteAmount: Float {
+        get { globals.vignetteAmount } set { globals.vignetteAmount = newValue }
+    }
+    var loopDuration: Float {
+        get { globals.loopDuration } set { globals.loopDuration = newValue }
+    }
 
-    // Loop — clip length for seamless looping. Export overrides with its duration.
-    var loopDuration: Float             // seconds
+    // MARK: - Defaults
 
     static let `default`: RenderParams = {
         let baseHue = Float.random(in: 0...(.pi * 2))
@@ -112,26 +254,43 @@ struct RenderParams: Equatable {
                             seed: MeshPointParams.randomSeed(),
                             color: color)
         }
+        // Order matches the render pipeline: Linear → Mesh → Wave → Glass, with
+        // Wave deliberately after Mesh so its UV distortion re-samples the
+        // composited scene (not just the bare background).
         return RenderParams(
-            lgColorA: SIMD4(0.04, 0.01, 0.12, 1.0),
-            lgColorB: SIMD4(0.02, 0.02, 0.04, 1.0),
-            lgAngle: .pi * 0.25,
-            lgRotationSpeed: 0.05,
-            waveAmplitude: 0.08,
-            waveFrequency: 2.2,
-            waveSpeed: 0.15,
-            meshOpacity: 0.85,
-            meshDriftSpeed: 0.4,
-            meshPoints: points,
-            glassEnabled: true,
-            glassAberration: 0.3,
-            glassBlurRadius: 0.15,
-            meshStyle: .grid,
-            grainAmount: 0.06,
-            vignetteAmount: 0.2,
-            loopDuration: 6.0
+            layers: [
+                LayerEntry(layer: .linear(LinearParams(
+                    colorA: SIMD4(0.04, 0.01, 0.12, 1.0),
+                    colorB: SIMD4(0.02, 0.02, 0.04, 1.0),
+                    angle: .pi * 0.25,
+                    rotationSpeed: 0.05
+                ))),
+                LayerEntry(layer: .mesh(MeshParams(
+                    style: .grid,
+                    opacity: 0.85,
+                    driftSpeed: 0.4,
+                    points: points
+                ))),
+                LayerEntry(layer: .wave(WaveParams(
+                    amplitude: 0.08,
+                    frequency: 2.2,
+                    speed: 0.15
+                ))),
+                LayerEntry(layer: .glass(GlassParams(
+                    enabled: true,
+                    aberration: 0.3,
+                    blurRadius: 0.15
+                )))
+            ],
+            globals: Globals(
+                loopDuration: 6.0,
+                grainAmount: 0.06,
+                vignetteAmount: 0.2
+            )
         )
     }()
+
+    // MARK: - Mesh-palette helpers
 
     /// Replace the mesh palette and (dark) background colors with an externally-supplied
     /// set — e.g. from image extraction. Positions and seeds of mesh points are preserved
@@ -266,32 +425,59 @@ struct RenderParams: Equatable {
         vignetteAmount = .random(in: 0...0.6)
     }
 
-    func makeUniforms(resolution: SIMD2<Float>,
-                      loopPhase: Float,
-                      loopFrames: Int32) -> Uniforms
+    // MARK: - Shader adapters
+
+    func makeLinearUniforms(loopPhase: Float) -> LinearUniforms {
+        LinearUniforms(
+            colorA: lgColorA,
+            colorB: lgColorB,
+            angle: lgAngle,
+            rotationSpeed: lgRotationSpeed,
+            loopPhase: loopPhase,
+            loopDuration: max(loopDuration, 0.001)
+        )
+    }
+
+    func makeWaveUniforms(loopPhase: Float) -> WaveUniforms {
+        WaveUniforms(
+            amplitude: waveAmplitude,
+            frequency: waveFrequency,
+            speed: waveSpeed,
+            loopPhase: loopPhase,
+            loopDuration: max(loopDuration, 0.001)
+        )
+    }
+
+    func makeMeshUniforms(loopPhase: Float) -> MeshUniforms {
+        MeshUniforms(
+            smokeColor: brightestMeshColor(),
+            opacity: meshOpacity,
+            driftSpeed: meshDriftSpeed,
+            loopPhase: loopPhase,
+            loopDuration: max(loopDuration, 0.001),
+            pointCount: Int32(meshPoints.count),
+            style: meshStyle.rawValue
+        )
+    }
+
+    func makeGlassUniforms() -> GlassUniforms {
+        GlassUniforms(
+            aberration: glassAberration,
+            blurRadius: glassBlurRadius,
+            enabled: glassEnabled ? 1 : 0
+        )
+    }
+
+    func makePostFxUniforms(resolution: SIMD2<Float>,
+                            loopPhase: Float,
+                            loopFrames: Int32) -> PostFxUniforms
     {
-        Uniforms(
+        PostFxUniforms(
             resolution: resolution,
             loopPhase: loopPhase,
-            meshPointCount: Int32(meshPoints.count),
-            lgColorA: lgColorA,
-            lgColorB: lgColorB,
-            lgAngle: lgAngle,
-            lgRotationSpeed: lgRotationSpeed,
-            waveAmplitude: waveAmplitude,
-            waveFrequency: waveFrequency,
-            waveSpeed: waveSpeed,
-            meshDriftSpeed: meshDriftSpeed,
-            meshOpacity: meshOpacity,
-            glassAberration: glassAberration,
-            glassBlurRadius: glassBlurRadius,
-            glassEnabled: glassEnabled ? 1 : 0,
             grainAmount: grainAmount,
             vignetteAmount: vignetteAmount,
-            meshStyle: meshStyle.rawValue,
-            loopDuration: max(loopDuration, 0.001),
-            loopFrames: max(loopFrames, 1),
-            smokeColor: brightestMeshColor()
+            loopFrames: max(loopFrames, 1)
         )
     }
 
