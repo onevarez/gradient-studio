@@ -129,6 +129,18 @@ struct RenderParams: Equatable {
         layers.swapAt(i, j)
     }
 
+    /// Move the layer identified by `sourceID` so it sits immediately before the
+    /// layer identified by `targetID`. Used by drag-and-drop reorder.
+    mutating func moveLayer(id sourceID: LayerEntry.ID, before targetID: LayerEntry.ID) {
+        guard let src = layers.firstIndex(where: { $0.id == sourceID }),
+              let dst = layers.firstIndex(where: { $0.id == targetID }),
+              src != dst
+        else { return }
+        let entry = layers.remove(at: src)
+        let insertAt = src < dst ? dst - 1 : dst
+        layers.insert(entry, at: insertAt)
+    }
+
     /// Insert a fresh default layer of `kind` immediately after the entry with
     /// the given `id`, or at the end if `id` is nil.
     mutating func addLayer(_ kind: LayerKind, after id: LayerEntry.ID? = nil) {

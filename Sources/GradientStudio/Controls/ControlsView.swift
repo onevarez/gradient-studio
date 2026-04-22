@@ -99,6 +99,18 @@ struct LayerRow: View {
         } label: {
             header
         }
+        // Drag-to-reorder: drag any row onto another to move it there. Taps on
+        // the row's buttons and disclosure chevron still work — draggable only
+        // activates on drag gestures. The ↑ / ↓ chevrons in the header are
+        // kept for keyboard / single-step reorder.
+        .draggable(entry.id.uuidString)
+        .dropDestination(for: String.self) { items, _ in
+            guard let str = items.first,
+                  let src = UUID(uuidString: str)
+            else { return false }
+            params.moveLayer(id: src, before: entry.id)
+            return true
+        }
     }
 
     @ViewBuilder private var controlsBody: some View {
