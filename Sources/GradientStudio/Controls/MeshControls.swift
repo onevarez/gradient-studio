@@ -1,7 +1,7 @@
 import SwiftUI
 
 struct MeshControls: View {
-    @Binding var params: RenderParams
+    @Binding var params: MeshParams
 
     private let columns = Array(
         repeating: GridItem(.flexible(), spacing: 6),
@@ -10,43 +10,43 @@ struct MeshControls: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Picker("Style", selection: $params.meshStyle) {
+            Picker("Style", selection: $params.style) {
                 Text("Grid").tag(MeshStyle.grid)
                 Text("Blobs").tag(MeshStyle.blobs)
                 Text("Smoke").tag(MeshStyle.smoke)
             }
             .pickerStyle(.segmented)
 
-            labelled("Opacity",     value: $params.meshOpacity,     range: 0...1)
-            labelled("Drift speed", value: $params.meshDriftSpeed, range: 0...1.5)
+            labelled("Opacity",     value: $params.opacity,     range: 0...1)
+            labelled("Drift speed", value: $params.driftSpeed, range: 0...1.5)
 
             HStack {
-                Text(params.meshStyle == .grid
+                Text(params.style == .grid
                      ? "\(GradientRendererLimits.meshGridWidth)×\(GradientRendererLimits.meshGridHeight) grid"
-                     : "\(params.meshPoints.count) blobs")
+                     : "\(params.points.count) blobs")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Reseed") { params.reseedMeshPoints() }
+                Button("Reseed") { params.reseed() }
             }
 
             HStack(spacing: 6) {
                 Button {
-                    params.cycleMeshClockwise()
+                    params.cycleClockwise()
                 } label: {
                     Label("Cycle", systemImage: "arrow.clockwise")
                 }
                 .help("Rotate grid colors clockwise (period 12)")
 
                 Button {
-                    params.blackoutMeshSides()
+                    params.blackoutSides()
                 } label: {
                     Label("Sides", systemImage: "rectangle.lefthalf.filled")
                 }
                 .help("Black out left & right columns")
 
                 Button {
-                    params.blackoutMeshTopBottom()
+                    params.blackoutTopBottom()
                 } label: {
                     Label("Top / Bot", systemImage: "rectangle.tophalf.filled")
                 }
@@ -58,7 +58,7 @@ struct MeshControls: View {
             Divider()
 
             LazyVGrid(columns: columns, spacing: 6) {
-                ForEach($params.meshPoints) { $pt in
+                ForEach($params.points) { $pt in
                     ColorPicker("", selection: Binding(
                         get: { Color.fromSIMD4(pt.color) },
                         set: { pt.color = $0.toSIMD4() }

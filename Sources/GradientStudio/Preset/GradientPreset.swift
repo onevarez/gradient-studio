@@ -128,23 +128,16 @@ extension GradientPreset {
     }
 
     /// Copy preset values into `params`. Replaces the entire layer list (preserving
-    /// preset order and per-layer enabled state) and overwrites globals. Mesh point
-    /// `id`s are regenerated as fresh UUIDs since they're not part of the wire format.
+    /// preset order and per-layer enabled state) and overwrites globals. Any
+    /// composition of layers is accepted, including empty, duplicates, or missing
+    /// kinds — the renderer handles each case. Mesh point `id`s are regenerated as
+    /// fresh UUIDs since they're not part of the wire format.
     func apply(to params: inout RenderParams) throws {
         var newLayers: [LayerEntry] = []
         for p in layers {
             let layer = try Self.makeLayer(from: p.params)
             newLayers.append(LayerEntry(layer: layer, enabled: p.enabled))
         }
-
-        // Day-1..3 invariant: exactly one of each kind present. Later phases will
-        // relax this to support add / duplicate / remove.
-        let kinds = Set(newLayers.map { Self.kindString(of: $0.layer) })
-        let expected: Set<String> = ["linear", "wave", "mesh", "glass"]
-        guard kinds == expected else {
-            throw PresetError.missingLayerKinds(got: kinds, expected: expected)
-        }
-
         params.layers = newLayers
         params.loopDuration    = globals.loopDuration
         params.grainAmount     = globals.grain
@@ -398,7 +391,6 @@ enum PresetError: LocalizedError {
     case unsupportedVersion(Int)
     case meshPointCountMismatch(got: Int, expected: Int)
     case unknownLayerKind(String)
-    case missingLayerKinds(got: Set<String>, expected: Set<String>)
 
     var errorDescription: String? {
         switch self {
@@ -414,9 +406,6 @@ enum PresetError: LocalizedError {
             return "Preset has \(got) mesh points; this app expects \(expected)."
         case .unknownLayerKind(let k):
             return "Preset references unknown layer kind \"\(k)\"."
-        case .missingLayerKinds(let got, let expected):
-            let missing = expected.subtracting(got).sorted().joined(separator: ", ")
-            return "Preset is missing required layer kinds: \(missing)."
         }
     }
 }

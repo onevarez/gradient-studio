@@ -41,9 +41,21 @@ struct ControlsView: View {
 
             labelled("Loop (s)", value: $state.params.loopDuration, range: 1...30)
 
-            ForEach(state.params.layers) { entry in
-                LayerRow(entry: entry, params: $state.params)
+            ForEach($state.params.layers) { $entry in
+                LayerRow(entry: $entry, params: $state.params)
             }
+
+            Menu {
+                ForEach(LayerKind.allCases) { kind in
+                    Button(kind.label) {
+                        state.params.addLayer(kind)
+                    }
+                }
+            } label: {
+                Label("Add Layer", systemImage: "plus.circle")
+                    .frame(maxWidth: .infinity)
+            }
+            .menuStyle(.borderlessButton)
 
             DisclosureGroup("Post") {
                 PostControls(params: $state.params).padding(.top, 4)
@@ -74,27 +86,27 @@ struct ControlsView: View {
 }
 
 /// One row per entry in `params.layers`. Header carries reorder (↑ / ↓), an
-/// enable toggle, and the kind label. Body expands into the kind's existing
-/// SwiftUI controls, which bind through `RenderParams`' computed projections.
+/// enable toggle, the kind label, duplicate, and trash. Body expands into the
+/// kind's SwiftUI controls, which bind directly to the entry's typed params.
 struct LayerRow: View {
-    let entry: LayerEntry
+    @Binding var entry: LayerEntry
     @Binding var params: RenderParams
     @State private var expanded: Bool = false
 
     var body: some View {
         DisclosureGroup(isExpanded: $expanded) {
-            controls.padding(.top, 4)
+            controlsBody.padding(.top, 4)
         } label: {
             header
         }
     }
 
-    @ViewBuilder private var controls: some View {
+    @ViewBuilder private var controlsBody: some View {
         switch entry.layer {
-        case .linear: LinearGradientControls(params: $params)
-        case .wave:   WaveControls(params: $params)
-        case .mesh:   MeshControls(params: $params)
-        case .glass:  GlassControls(params: $params)
+        case .linear: LinearGradientControls(params: linearParamsBinding)
+        case .wave:   WaveControls(params: waveParamsBinding)
+        case .mesh:   MeshControls(params: meshParamsBinding)
+        case .glass:  GlassControls(params: glassParamsBinding)
         }
     }
 
@@ -103,8 +115,7 @@ struct LayerRow: View {
             Button {
                 params.moveLayer(id: entry.id, by: -1)
             } label: {
-                Image(systemName: "chevron.up")
-                    .font(.caption)
+                Image(systemName: "chevron.up").font(.caption)
             }
             .buttonStyle(.borderless)
             .disabled(isFirst)
@@ -113,14 +124,13 @@ struct LayerRow: View {
             Button {
                 params.moveLayer(id: entry.id, by: 1)
             } label: {
-                Image(systemName: "chevron.down")
-                    .font(.caption)
+                Image(systemName: "chevron.down").font(.caption)
             }
             .buttonStyle(.borderless)
             .disabled(isLast)
             .help("Move layer down")
 
-            Toggle("", isOn: enabledBinding)
+            Toggle("", isOn: $entry.enabled)
                 .labelsHidden()
                 .toggleStyle(.switch)
                 .controlSize(.mini)
@@ -130,20 +140,76 @@ struct LayerRow: View {
                 .foregroundStyle(entry.enabled ? Color.primary : Color.secondary)
 
             Spacer()
+
+            Button {
+                params.duplicateLayer(id: entry.id)
+            } label: {
+                Image(systemName: "plus.square.on.square").font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .help("Duplicate layer")
+
+            Button {
+                params.removeLayer(id: entry.id)
+            } label: {
+                Image(systemName: "trash").font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .foregroundStyle(.red)
+            .help("Remove layer")
         }
     }
 
     private var isFirst: Bool { params.layers.first?.id == entry.id }
     private var isLast:  Bool { params.layers.last?.id  == entry.id }
 
-    private var enabledBinding: Binding<Bool> {
+    // MARK: - Typed params bindings into the current entry's layer case.
+    //
+    // The getter's fallback branch is never hit in normal operation — the
+    // switch in `controlsBody` guarantees the kind matches — but we return a
+    // benign default instead of crashing, so a SwiftUI diff corner case
+    // doesn't tank the UI.
+
+    private var linearParamsBinding: Binding<LinearParams> {
         Binding(
-            get: { entry.enabled },
-            set: { value in
-                if let i = params.layers.firstIndex(where: { $0.id == entry.id }) {
-                    params.layers[i].enabled = value
-                }
-            }
+            get: {
+                if case .linear(let p) = entry.layer { return p }
+                return LinearParams(colorA: SIMD4(0,0,0,1),
+                                    colorB: SIMD4(0,0,0,1),
+                                    angle: 0,
+                                    rotationSpeed: 0)
+            },
+            set: { entry.layer = .linear($0) }
+        )
+    }
+
+    private var waveParamsBinding: Binding<WaveParams> {
+        Binding(
+            get: {
+                if case .wave(let p) = entry.layer { return p }
+                return WaveParams(amplitude: 0, frequency: 0, speed: 0)
+            },
+            set: { entry.layer = .wave($0) }
+        )
+    }
+
+    private var meshParamsBinding: Binding<MeshParams> {
+        Binding(
+            get: {
+                if case .mesh(let p) = entry.layer { return p }
+                return MeshParams(style: .grid, opacity: 0, driftSpeed: 0, points: [])
+            },
+            set: { entry.layer = .mesh($0) }
+        )
+    }
+
+    private var glassParamsBinding: Binding<GlassParams> {
+        Binding(
+            get: {
+                if case .glass(let p) = entry.layer { return p }
+                return GlassParams(enabled: false, aberration: 0, blurRadius: 0)
+            },
+            set: { entry.layer = .glass($0) }
         )
     }
 }

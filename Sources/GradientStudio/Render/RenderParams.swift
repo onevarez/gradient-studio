@@ -2,8 +2,8 @@ import Foundation
 import simd
 
 // Per-pass uniform structs. Memory layout MUST match the corresponding struct
-// in Shaders.swift. Each layer's fragment function reads one of these. Any field
-// reorder or new field requires a coordinated edit on both sides.
+// in Shaders.swift. Any field reorder or new field requires a coordinated edit
+// on both sides.
 
 struct LinearUniforms {
     var colorA: SIMD4<Float>
@@ -74,7 +74,7 @@ struct MeshPointParams: Equatable, Identifiable {
 
     /// Standalone random point — used when the caller just needs "one more mesh point"
     /// and doesn't care about harmonizing with siblings. For a full palette refresh,
-    /// call `RenderParams.randomize()` instead so all colors share a base hue.
+    /// call `MeshParams.reseed()` instead so all colors share a base hue.
     static func random() -> MeshPointParams {
         let baseHue = Float.random(in: 0...(.pi * 2))
         return MeshPointParams(
@@ -97,78 +97,28 @@ struct MeshPointParams: Equatable, Identifiable {
 
 // MARK: - RenderParams
 
-// Canonical storage is `layers: [LayerEntry]` + `globals: Globals`. The flat
-// `lg*`, `wave*`, `mesh*`, `glass*`, and post-fx properties below are computed
-// projections over the layer list — the UI, preset, shader-uniform builder, and
-// export path all continue to use them unchanged.
-//
-// Invariant: `layers` contains exactly one entry of each kind. Order and
-// per-entry `enabled` are user-editable (reorder + toggle). Later phases will
-// relax "exactly one of each kind" to support add / duplicate / remove.
+/// Canonical scene state: an ordered, user-editable list of layers plus scene
+/// globals. Multiple layers of the same kind are allowed (two mesh layers, no
+/// glass, three waves in a row — all valid). The per-kind SwiftUI controls
+/// bind directly to a specific layer's params via `LayerRow`, so mutations
+/// target a single entry even when several of the same kind exist.
 struct RenderParams: Equatable {
     var layers: [LayerEntry]
     var globals: Globals
 
-    // MARK: - Typed layer accessors
-    //
-    // These locate the first entry of each kind and read/write via the enum case.
-    // `preconditionFailure` guards the invariant — the code paths that build
-    // `RenderParams` (default, randomize, preset.apply, undo/redo) all produce
-    // four-entry arrays with exactly one of each kind.
+    // MARK: - Convenience projections onto globals
 
-    private var linear: LinearParams {
-        get {
-            for entry in layers { if case .linear(let p) = entry.layer { return p } }
-            preconditionFailure("RenderParams has no linear layer")
-        }
-        set {
-            for i in layers.indices {
-                if case .linear = layers[i].layer { layers[i].layer = .linear(newValue); return }
-            }
-            preconditionFailure("RenderParams has no linear layer")
-        }
+    var loopDuration: Float {
+        get { globals.loopDuration }   set { globals.loopDuration = newValue }
+    }
+    var grainAmount: Float {
+        get { globals.grainAmount }    set { globals.grainAmount = newValue }
+    }
+    var vignetteAmount: Float {
+        get { globals.vignetteAmount } set { globals.vignetteAmount = newValue }
     }
 
-    private var wave: WaveParams {
-        get {
-            for entry in layers { if case .wave(let p) = entry.layer { return p } }
-            preconditionFailure("RenderParams has no wave layer")
-        }
-        set {
-            for i in layers.indices {
-                if case .wave = layers[i].layer { layers[i].layer = .wave(newValue); return }
-            }
-            preconditionFailure("RenderParams has no wave layer")
-        }
-    }
-
-    private var mesh: MeshParams {
-        get {
-            for entry in layers { if case .mesh(let p) = entry.layer { return p } }
-            preconditionFailure("RenderParams has no mesh layer")
-        }
-        set {
-            for i in layers.indices {
-                if case .mesh = layers[i].layer { layers[i].layer = .mesh(newValue); return }
-            }
-            preconditionFailure("RenderParams has no mesh layer")
-        }
-    }
-
-    private var glass: GlassParams {
-        get {
-            for entry in layers { if case .glass(let p) = entry.layer { return p } }
-            preconditionFailure("RenderParams has no glass layer")
-        }
-        set {
-            for i in layers.indices {
-                if case .glass = layers[i].layer { layers[i].layer = .glass(newValue); return }
-            }
-            preconditionFailure("RenderParams has no glass layer")
-        }
-    }
-
-    // MARK: - Layer reorder
+    // MARK: - Layer operations
 
     /// Move the layer identified by `id` up (`delta = -1`) or down (`delta = +1`)
     /// in the render order. No-op if the move would fall outside the array.
@@ -179,70 +129,33 @@ struct RenderParams: Equatable {
         layers.swapAt(i, j)
     }
 
-    // MARK: - Flat computed projections (back-compat surface)
-
-    // Linear
-    var lgColorA: SIMD4<Float> {
-        get { linear.colorA } set { linear.colorA = newValue }
-    }
-    var lgColorB: SIMD4<Float> {
-        get { linear.colorB } set { linear.colorB = newValue }
-    }
-    var lgAngle: Float {
-        get { linear.angle } set { linear.angle = newValue }
-    }
-    var lgRotationSpeed: Float {
-        get { linear.rotationSpeed } set { linear.rotationSpeed = newValue }
+    /// Insert a fresh default layer of `kind` immediately after the entry with
+    /// the given `id`, or at the end if `id` is nil.
+    mutating func addLayer(_ kind: LayerKind, after id: LayerEntry.ID? = nil) {
+        let entry = LayerEntry(layer: kind.makeDefaultLayer())
+        if let id, let i = layers.firstIndex(where: { $0.id == id }) {
+            layers.insert(entry, at: i + 1)
+        } else {
+            layers.append(entry)
+        }
     }
 
-    // Wave
-    var waveAmplitude: Float {
-        get { wave.amplitude } set { wave.amplitude = newValue }
-    }
-    var waveFrequency: Float {
-        get { wave.frequency } set { wave.frequency = newValue }
-    }
-    var waveSpeed: Float {
-        get { wave.speed } set { wave.speed = newValue }
+    /// Insert a copy of the layer identified by `id` immediately after it. The
+    /// copy gets a fresh UUID so SwiftUI treats the rows as distinct.
+    mutating func duplicateLayer(id: LayerEntry.ID) {
+        guard let i = layers.firstIndex(where: { $0.id == id }) else { return }
+        let source = layers[i]
+        let copy = LayerEntry(layer: source.layer, enabled: source.enabled)
+        layers.insert(copy, at: i + 1)
     }
 
-    // Mesh
-    var meshOpacity: Float {
-        get { mesh.opacity } set { mesh.opacity = newValue }
-    }
-    var meshDriftSpeed: Float {
-        get { mesh.driftSpeed } set { mesh.driftSpeed = newValue }
-    }
-    var meshPoints: [MeshPointParams] {
-        get { mesh.points } set { mesh.points = newValue }
-    }
-    var meshStyle: MeshStyle {
-        get { mesh.style } set { mesh.style = newValue }
+    /// Remove the layer identified by `id`. No-op if it doesn't exist. Removing
+    /// every layer leaves an empty pipeline — post-fx runs on a black canvas.
+    mutating func removeLayer(id: LayerEntry.ID) {
+        layers.removeAll { $0.id == id }
     }
 
-    // Glass
-    var glassEnabled: Bool {
-        get { glass.enabled } set { glass.enabled = newValue }
-    }
-    var glassAberration: Float {
-        get { glass.aberration } set { glass.aberration = newValue }
-    }
-    var glassBlurRadius: Float {
-        get { glass.blurRadius } set { glass.blurRadius = newValue }
-    }
-
-    // Globals
-    var grainAmount: Float {
-        get { globals.grainAmount } set { globals.grainAmount = newValue }
-    }
-    var vignetteAmount: Float {
-        get { globals.vignetteAmount } set { globals.vignetteAmount = newValue }
-    }
-    var loopDuration: Float {
-        get { globals.loopDuration } set { globals.loopDuration = newValue }
-    }
-
-    // MARK: - Defaults
+    // MARK: - Default
 
     static let `default`: RenderParams = {
         let baseHue = Float.random(in: 0...(.pi * 2))
@@ -254,9 +167,9 @@ struct RenderParams: Equatable {
                             seed: MeshPointParams.randomSeed(),
                             color: color)
         }
-        // Order matches the render pipeline: Linear → Mesh → Wave → Glass, with
-        // Wave deliberately after Mesh so its UV distortion re-samples the
-        // composited scene (not just the bare background).
+        // Render order: Linear → Mesh → Wave → Glass. Wave after Mesh so its
+        // UV distortion re-samples the composited scene and visibly ripples
+        // the mesh pattern.
         return RenderParams(
             layers: [
                 LayerEntry(layer: .linear(LinearParams(
@@ -290,187 +203,162 @@ struct RenderParams: Equatable {
         )
     }()
 
-    // MARK: - Mesh-palette helpers
+    // MARK: - Whole-scene helpers
 
-    /// Replace the mesh palette and (dark) background colors with an externally-supplied
-    /// set — e.g. from image extraction. Positions and seeds of mesh points are preserved
-    /// so motion stays continuous; only colors change. The two darkest palette entries
-    /// become the linear-gradient stops so Smoke/Blobs styles still read correctly
-    /// against the background.
+    /// Apply an externally-supplied palette (e.g. extracted from an image) to
+    /// every mesh and linear layer. Mesh layers share the same color list;
+    /// linear layers get the two darkest entries as their gradient stops so
+    /// Smoke/Blobs styles still read correctly against the background.
     mutating func applyPalette(_ colors: [SIMD4<Float>]) {
         guard !colors.isEmpty else { return }
-        let n = GradientRendererLimits.meshVertexCount
-        for i in 0..<n {
-            meshPoints[i].color = colors[i % colors.count]
-        }
-        let byLuma = colors.sorted { Self.relativeLuminance($0) < Self.relativeLuminance($1) }
-        lgColorA = byLuma[0]
-        lgColorB = byLuma.count > 1 ? byLuma[1] : byLuma[0]
-    }
+        let byLuma = colors.sorted { MeshParams.relativeLuminance($0) < MeshParams.relativeLuminance($1) }
+        let deepA = byLuma[0]
+        let deepB = byLuma.count > 1 ? byLuma[1] : byLuma[0]
 
-    private static func relativeLuminance(_ c: SIMD4<Float>) -> Float {
-        0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
-    }
-
-    /// Rotate the mesh palette one step clockwise around the 4×4 grid. The outer ring
-    /// (12 cells) and inner ring (4 cells) each rotate by one — after 12 calls the grid
-    /// returns to its starting arrangement (LCM of ring periods 12 and 4).
-    mutating func cycleMeshClockwise() {
-        // Index layout (row 0 = bottom, row 3 = top):
-        //   12 13 14 15
-        //    8  9 10 11
-        //    4  5  6  7
-        //    0  1  2  3
-        //
-        // Clockwise from top-left: top row L→R, right col top→bottom,
-        // bottom row R→L, left col bottom→top.
-        let outer: [Int] = [12, 13, 14, 15, 11, 7, 3, 2, 1, 0, 4, 8]
-        let inner: [Int] = [9, 10, 6, 5]
-        rotateMeshColors(along: outer)
-        rotateMeshColors(along: inner)
-    }
-
-    private mutating func rotateMeshColors(along indices: [Int]) {
-        guard indices.count > 1 else { return }
-        let last = meshPoints[indices.last!].color
-        for i in stride(from: indices.count - 1, through: 1, by: -1) {
-            meshPoints[indices[i]].color = meshPoints[indices[i - 1]].color
-        }
-        meshPoints[indices[0]].color = last
-    }
-
-    /// Set the leftmost and rightmost grid columns to black.
-    mutating func blackoutMeshSides() {
-        let black = SIMD4<Float>(0, 0, 0, 1)
-        let w = GradientRendererLimits.meshGridWidth
-        let h = GradientRendererLimits.meshGridHeight
-        for row in 0..<h {
-            meshPoints[row * w + 0].color = black
-            meshPoints[row * w + (w - 1)].color = black
+        for i in layers.indices {
+            switch layers[i].layer {
+            case .linear(var l):
+                l.colorA = deepA
+                l.colorB = deepB
+                layers[i].layer = .linear(l)
+            case .mesh(var m):
+                m.applyColors(colors)
+                layers[i].layer = .mesh(m)
+            case .wave, .glass:
+                break
+            }
         }
     }
 
-    /// Set the top and bottom grid rows to black.
-    mutating func blackoutMeshTopBottom() {
-        let black = SIMD4<Float>(0, 0, 0, 1)
-        let w = GradientRendererLimits.meshGridWidth
-        let h = GradientRendererLimits.meshGridHeight
-        for col in 0..<w {
-            meshPoints[0 * w + col].color = black
-            meshPoints[(h - 1) * w + col].color = black
-        }
-    }
-
-    mutating func reseedMeshPoints() {
-        let baseHue = Float.random(in: 0...(.pi * 2))
-        let palette = ColorHarmony.palette(count: GradientRendererLimits.meshVertexCount,
-                                           baseHue: baseHue,
-                                           strategy: .analogous)
-        meshPoints = palette.map { color in
-            MeshPointParams(position: MeshPointParams.randomPosition(),
-                            seed: MeshPointParams.randomSeed(),
-                            color: color)
-        }
-    }
-
+    /// Randomize every layer and the post-fx globals with a shared base hue
+    /// and harmony strategy so the result stays cohesive across multiple layers
+    /// of the same kind.
     mutating func randomize() {
         let baseHue = Float.random(in: 0...(.pi * 2))
         let strategy = ColorHarmony.Strategy.random()
-
-        // Linear gradient: two deep tones in the same family as the mesh, for a cohesive
-        // background that the vivid mesh points pop against.
         let (deepA, deepB) = ColorHarmony.deepPair(baseHue: baseHue, strategy: strategy)
-        lgColorA = deepA
-        lgColorB = deepB
-        lgAngle = .random(in: 0...(.pi * 2))
-        lgRotationSpeed = .random(in: -0.3...0.3)
-
-        // Wave range spans both subtle breathing and the glitch/zigzag look.
-        waveAmplitude = Bool.random()
-            ? .random(in: 0...0.08)     // subtle
-            : .random(in: 0.15...0.35)  // glitchy
-        waveFrequency = .random(in: 0.5...5)
-        waveSpeed = .random(in: 0...0.5)
-
-        meshOpacity = .random(in: 0.6...1.0)
-        meshDriftSpeed = .random(in: 0...1.0)
-
         let palette = ColorHarmony.palette(count: GradientRendererLimits.meshVertexCount,
                                            baseHue: baseHue,
                                            strategy: strategy)
-        meshPoints = palette.map { color in
-            MeshPointParams(position: MeshPointParams.randomPosition(),
-                            seed: MeshPointParams.randomSeed(),
-                            color: color)
+
+        for i in layers.indices {
+            switch layers[i].layer {
+            case .linear(var l):
+                l.colorA = deepA
+                l.colorB = deepB
+                l.angle = .random(in: 0...(.pi * 2))
+                l.rotationSpeed = .random(in: -0.3...0.3)
+                layers[i].layer = .linear(l)
+
+            case .wave(var w):
+                // Wave range spans both subtle breathing and the glitch/zigzag look.
+                w.amplitude = Bool.random()
+                    ? .random(in: 0...0.08)
+                    : .random(in: 0.15...0.35)
+                w.frequency = .random(in: 0.5...5)
+                w.speed = .random(in: 0...0.5)
+                layers[i].layer = .wave(w)
+
+            case .mesh(var m):
+                m.opacity = .random(in: 0.6...1.0)
+                m.driftSpeed = .random(in: 0...1.0)
+                m.points = palette.map { color in
+                    MeshPointParams(position: MeshPointParams.randomPosition(),
+                                    seed: MeshPointParams.randomSeed(),
+                                    color: color)
+                }
+                // Style: grid looks great edge-to-edge; blobs and smoke look great
+                // on a dark canvas. Weight toward grid.
+                switch Int.random(in: 0..<6) {
+                case 0:  m.style = .blobs
+                case 1:  m.style = .smoke
+                default: m.style = .grid
+                }
+                // Smoke animation is driven entirely by driftSpeed — pin to a
+                // lively range so randomize never produces a static scene.
+                if m.style == .smoke {
+                    m.driftSpeed = .random(in: 0.4...1.0)
+                }
+                layers[i].layer = .mesh(m)
+
+            case .glass(var g):
+                g.enabled = Bool.random()
+                g.aberration = .random(in: 0...0.5)
+                g.blurRadius = .random(in: 0...0.3)
+                layers[i].layer = .glass(g)
+            }
         }
 
-        glassEnabled = Bool.random()
-        glassAberration = .random(in: 0...0.5)
-        glassBlurRadius = .random(in: 0...0.3)
-
-        // Mesh style: grid looks great edge-to-edge; blobs and smoke look great on a
-        // dark canvas. Weight toward grid so the "black canvas" styles don't dominate.
-        switch Int.random(in: 0..<6) {
-        case 0:  meshStyle = .blobs
-        case 1:  meshStyle = .smoke
-        default: meshStyle = .grid
-        }
-
-        // Smoke animation is driven entirely by meshDriftSpeed — pin to a lively range
-        // so randomize never produces a static scene.
-        if meshStyle == .smoke {
-            meshDriftSpeed = .random(in: 0.4...1.0)
-        }
-        grainAmount = .random(in: 0.02...0.06)
-        vignetteAmount = .random(in: 0...0.6)
+        globals.grainAmount    = .random(in: 0.02...0.06)
+        globals.vignetteAmount = .random(in: 0...0.6)
     }
+}
 
-    // MARK: - Shader adapters
+// MARK: - Uniform builders on each params struct
 
-    func makeLinearUniforms(loopPhase: Float) -> LinearUniforms {
+extension LinearParams {
+    func uniforms(loopPhase: Float, loopDuration: Float) -> LinearUniforms {
         LinearUniforms(
-            colorA: lgColorA,
-            colorB: lgColorB,
-            angle: lgAngle,
-            rotationSpeed: lgRotationSpeed,
+            colorA: colorA,
+            colorB: colorB,
+            angle: angle,
+            rotationSpeed: rotationSpeed,
             loopPhase: loopPhase,
             loopDuration: max(loopDuration, 0.001)
         )
     }
+}
 
-    func makeWaveUniforms(loopPhase: Float) -> WaveUniforms {
+extension WaveParams {
+    func uniforms(loopPhase: Float, loopDuration: Float) -> WaveUniforms {
         WaveUniforms(
-            amplitude: waveAmplitude,
-            frequency: waveFrequency,
-            speed: waveSpeed,
+            amplitude: amplitude,
+            frequency: frequency,
+            speed: speed,
             loopPhase: loopPhase,
             loopDuration: max(loopDuration, 0.001)
         )
     }
+}
 
-    func makeMeshUniforms(loopPhase: Float) -> MeshUniforms {
+extension MeshParams {
+    func uniforms(loopPhase: Float, loopDuration: Float) -> MeshUniforms {
         MeshUniforms(
-            smokeColor: brightestMeshColor(),
-            opacity: meshOpacity,
-            driftSpeed: meshDriftSpeed,
+            smokeColor: brightestColor,
+            opacity: opacity,
+            driftSpeed: driftSpeed,
             loopPhase: loopPhase,
             loopDuration: max(loopDuration, 0.001),
-            pointCount: Int32(meshPoints.count),
-            style: meshStyle.rawValue
+            pointCount: Int32(points.count),
+            style: style.rawValue
         )
     }
 
-    func makeGlassUniforms() -> GlassUniforms {
+    /// Pack `MeshPointParams` into the wire format the shader expects.
+    func metalMeshPoints() -> [MeshPoint] {
+        points.map { p in
+            MeshPoint(
+                posAndSeed: SIMD4(p.position.x, p.position.y, p.seed.x, p.seed.y),
+                color: p.color
+            )
+        }
+    }
+}
+
+extension GlassParams {
+    func uniforms() -> GlassUniforms {
         GlassUniforms(
-            aberration: glassAberration,
-            blurRadius: glassBlurRadius,
-            enabled: glassEnabled ? 1 : 0
+            aberration: aberration,
+            blurRadius: blurRadius,
+            enabled: enabled ? 1 : 0
         )
     }
+}
 
-    func makePostFxUniforms(resolution: SIMD2<Float>,
-                            loopPhase: Float,
-                            loopFrames: Int32) -> PostFxUniforms
+extension Globals {
+    func postFxUniforms(resolution: SIMD2<Float>,
+                        loopPhase: Float,
+                        loopFrames: Int32) -> PostFxUniforms
     {
         PostFxUniforms(
             resolution: resolution,
@@ -479,24 +367,6 @@ struct RenderParams: Equatable {
             vignetteAmount: vignetteAmount,
             loopFrames: max(loopFrames, 1)
         )
-    }
-
-    /// Brightest palette entry — used as Smoke's emission color so the glow stands
-    /// out against the (dark) linear-gradient background regardless of palette order.
-    private func brightestMeshColor() -> SIMD4<Float> {
-        meshPoints
-            .map(\.color)
-            .max(by: { Self.relativeLuminance($0) < Self.relativeLuminance($1) })
-            ?? SIMD4(1, 1, 1, 1)
-    }
-
-    func makeMeshPointsArray() -> [MeshPoint] {
-        meshPoints.map { p in
-            MeshPoint(
-                posAndSeed: SIMD4(p.position.x, p.position.y, p.seed.x, p.seed.y),
-                color: p.color
-            )
-        }
     }
 }
 

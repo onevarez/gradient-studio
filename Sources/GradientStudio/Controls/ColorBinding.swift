@@ -26,10 +26,12 @@ extension Color {
     }
 }
 
-/// Helper to bind a SwiftUI `Color` control to a `SIMD4<Float>` stored in `RenderParams`.
-func colorBinding(_ params: Binding<RenderParams>, _ keyPath: WritableKeyPath<RenderParams, SIMD4<Float>>) -> Binding<Color> {
+/// Helper to bind a SwiftUI `Color` control to a `SIMD4<Float>` stored anywhere
+/// in a value-typed tree (e.g. inside a layer's params struct).
+func colorBinding<Root>(_ root: Binding<Root>,
+                        _ keyPath: WritableKeyPath<Root, SIMD4<Float>>) -> Binding<Color> {
     Binding(
-        get: { Color.fromSIMD4(params.wrappedValue[keyPath: keyPath]) },
-        set: { params.wrappedValue[keyPath: keyPath] = $0.toSIMD4() }
+        get: { Color.fromSIMD4(root.wrappedValue[keyPath: keyPath]) },
+        set: { root.wrappedValue[keyPath: keyPath] = $0.toSIMD4() }
     )
 }

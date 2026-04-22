@@ -12,13 +12,16 @@ enum RendererError: Error {
 }
 
 /// Multi-pass renderer. Each layer kind (Linear, Wave, Mesh, Glass) is its own
-/// fragment pipeline that reads the previous layer's output (except Linear, which
-/// writes a fresh gradient). A final PostFx pass applies grain + vignette and
-/// writes to the target texture.
+/// fragment pipeline that reads the previous layer's output (except Linear,
+/// which writes a fresh gradient). A final PostFx pass applies grain + vignette
+/// and writes to the target texture.
 ///
 /// Intermediate passes use `rgba16Float` ping-pong textures so repeated render-
 /// texture round-trips don't lose precision to 8-bit quantization; the final
 /// PostFx pipeline writes to the caller's target (`bgra8Unorm`).
+///
+/// Multiple layers of the same kind are supported. Each layer gets its own
+/// uniform buffer from a per-kind pool, grown lazily as needed.
 final class GradientRenderer {
     static let pixelFormat: MTLPixelFormat = .bgra8Unorm
     static let intermediatePixelFormat: MTLPixelFormat = .rgba16Float
@@ -34,12 +37,16 @@ final class GradientRenderer {
 
     private let sampler: MTLSamplerState
 
-    private let linearUniformsBuffer: MTLBuffer
-    private let waveUniformsBuffer: MTLBuffer
-    private let meshUniformsBuffer: MTLBuffer
-    private let glassUniformsBuffer: MTLBuffer
+    // Per-kind uniform buffer pools. Each pass in the layer loop gets its own
+    // buffer so the GPU sees distinct uniforms per pass even when the CPU has
+    // written to several "of the same kind" within one command buffer.
+    private var linearUniformsBuffers: [MTLBuffer] = []
+    private var waveUniformsBuffers:   [MTLBuffer] = []
+    private var meshUniformsBuffers:   [MTLBuffer] = []
+    private var meshPointsBuffers:     [MTLBuffer] = []
+    private var glassUniformsBuffers:  [MTLBuffer] = []
+
     private let postFxUniformsBuffer: MTLBuffer
-    private let meshPointsBuffer: MTLBuffer
 
     // Ping-pong textures. Lazily (re)allocated to match target size.
     private var pingA: MTLTexture?
@@ -59,7 +66,6 @@ final class GradientRenderer {
             throw RendererError.cannotCompileLibrary(error)
         }
 
-        // Vertex shader is shared across all passes.
         guard let vfn = library.makeFunction(name: "vertexMain") else {
             throw RendererError.missingFunction
         }
@@ -98,27 +104,12 @@ final class GradientRenderer {
         }
         self.sampler = s
 
-        func makeBuffer<T>(_ type: T.Type, label: String) throws -> MTLBuffer {
-            guard let b = device.makeBuffer(length: MemoryLayout<T>.stride,
-                                            options: .storageModeShared) else {
-                throw RendererError.bufferAllocation
-            }
-            b.label = label
-            return b
-        }
-
-        self.linearUniformsBuffer  = try makeBuffer(LinearUniforms.self,  label: "LinearUniforms")
-        self.waveUniformsBuffer    = try makeBuffer(WaveUniforms.self,    label: "WaveUniforms")
-        self.meshUniformsBuffer    = try makeBuffer(MeshUniforms.self,    label: "MeshUniforms")
-        self.glassUniformsBuffer   = try makeBuffer(GlassUniforms.self,   label: "GlassUniforms")
-        self.postFxUniformsBuffer  = try makeBuffer(PostFxUniforms.self,  label: "PostFxUniforms")
-
-        let meshBytes = MemoryLayout<MeshPoint>.stride * GradientRendererLimits.maxMeshPoints
-        guard let mb = device.makeBuffer(length: meshBytes, options: .storageModeShared) else {
+        guard let pfxBuf = device.makeBuffer(length: MemoryLayout<PostFxUniforms>.stride,
+                                             options: .storageModeShared) else {
             throw RendererError.bufferAllocation
         }
-        mb.label = "MeshPoints"
-        self.meshPointsBuffer = mb
+        pfxBuf.label = "PostFxUniforms"
+        self.postFxUniformsBuffer = pfxBuf
     }
 
     /// Encode one full-screen gradient draw into the given command buffer, writing to `target`.
@@ -143,59 +134,72 @@ final class GradientRenderer {
         // Ensure ping-pong textures match the target resolution.
         let (pA, pB) = ensurePingPong(width: target.width, height: target.height)
 
-        // Upload per-pass uniforms.
-        uploadUniforms(params.makeLinearUniforms(loopPhase: phase), into: linearUniformsBuffer)
-        uploadUniforms(params.makeWaveUniforms(loopPhase: phase),   into: waveUniformsBuffer)
-        uploadUniforms(params.makeMeshUniforms(loopPhase: phase),   into: meshUniformsBuffer)
-        uploadUniforms(params.makeGlassUniforms(),                  into: glassUniformsBuffer)
-        uploadUniforms(params.makePostFxUniforms(
-                          resolution: SIMD2(Float(target.width), Float(target.height)),
-                          loopPhase: phase,
-                          loopFrames: frames),
-                       into: postFxUniformsBuffer)
-
-        // Upload mesh points.
-        let points = params.makeMeshPointsArray()
-        if !points.isEmpty {
-            _ = points.withUnsafeBufferPointer { buf in
-                memcpy(meshPointsBuffer.contents(),
-                       buf.baseAddress,
-                       MemoryLayout<MeshPoint>.stride * points.count)
-            }
-        }
-
-        // Clear the initial canvas so the first enabled layer has a defined
-        // input (matters if Linear isn't first, or if no Linear is enabled).
+        // Seed canvas so a non-Linear first layer has a defined (black) input.
         encodeClearPass(commandBuffer, target: pA)
 
         var current = pA
         var next    = pB
 
+        // Per-kind indices into the uniform buffer pools. Advance on use so
+        // successive layers of the same kind bind distinct buffers.
+        var linearIdx = 0
+        var waveIdx   = 0
+        var meshIdx   = 0
+        var glassIdx  = 0
+
         for entry in params.layers where entry.enabled {
             switch entry.layer {
-            case .linear:
-                // Linear ignores its input and writes a fresh gradient.
-                encodeLinearPass(commandBuffer, target: next)
-            case .wave:
+            case .linear(let p):
+                let buf = linearBuffer(at: linearIdx)
+                uploadUniforms(p.uniforms(loopPhase: phase, loopDuration: duration),
+                               into: buf)
+                encodeLinearPass(commandBuffer, uniformsBuffer: buf, target: next)
+                linearIdx += 1
+
+            case .wave(let p):
+                let buf = waveBuffer(at: waveIdx)
+                uploadUniforms(p.uniforms(loopPhase: phase, loopDuration: duration),
+                               into: buf)
                 encodeInputPass(commandBuffer,
                                 pipeline: wavePipeline,
-                                uniformsBuffer: waveUniformsBuffer,
+                                uniformsBuffer: buf,
                                 input: current,
                                 target: next)
-            case .mesh:
-                encodeMeshPass(commandBuffer, input: current, target: next)
-            case .glass:
+                waveIdx += 1
+
+            case .mesh(let p):
+                let ubuf = meshBuffer(at: meshIdx)
+                let pbuf = meshPointsBuffer(at: meshIdx)
+                uploadUniforms(p.uniforms(loopPhase: phase, loopDuration: duration),
+                               into: ubuf)
+                uploadMeshPoints(p.metalMeshPoints(), into: pbuf)
+                encodeMeshPass(commandBuffer,
+                               uniformsBuffer: ubuf,
+                               meshPointsBuffer: pbuf,
+                               input: current,
+                               target: next)
+                meshIdx += 1
+
+            case .glass(let p):
+                let buf = glassBuffer(at: glassIdx)
+                uploadUniforms(p.uniforms(), into: buf)
                 encodeInputPass(commandBuffer,
                                 pipeline: glassPipeline,
-                                uniformsBuffer: glassUniformsBuffer,
+                                uniformsBuffer: buf,
                                 input: current,
                                 target: next)
+                glassIdx += 1
             }
             swap(&current, &next)
         }
 
         // PostFx always runs last, reading the final layer output and writing
         // to the caller's target texture (bgra8Unorm).
+        uploadUniforms(params.globals.postFxUniforms(
+                         resolution: SIMD2(Float(target.width), Float(target.height)),
+                         loopPhase: phase,
+                         loopFrames: frames),
+                       into: postFxUniformsBuffer)
         encodeInputPass(commandBuffer,
                         pipeline: postFxPipeline,
                         uniformsBuffer: postFxUniformsBuffer,
@@ -205,12 +209,15 @@ final class GradientRenderer {
 
     // MARK: - Pass encoders
 
-    private func encodeLinearPass(_ cb: MTLCommandBuffer, target: MTLTexture) {
+    private func encodeLinearPass(_ cb: MTLCommandBuffer,
+                                  uniformsBuffer: MTLBuffer,
+                                  target: MTLTexture)
+    {
         let pass = Self.makePassDescriptor(target: target)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
         enc.label = "Linear pass"
         enc.setRenderPipelineState(linearPipeline)
-        enc.setFragmentBuffer(linearUniformsBuffer, offset: 0, index: 0)
+        enc.setFragmentBuffer(uniformsBuffer, offset: 0, index: 0)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc.endEncoding()
     }
@@ -232,12 +239,17 @@ final class GradientRenderer {
         enc.endEncoding()
     }
 
-    private func encodeMeshPass(_ cb: MTLCommandBuffer, input: MTLTexture, target: MTLTexture) {
+    private func encodeMeshPass(_ cb: MTLCommandBuffer,
+                                uniformsBuffer: MTLBuffer,
+                                meshPointsBuffer: MTLBuffer,
+                                input: MTLTexture,
+                                target: MTLTexture)
+    {
         let pass = Self.makePassDescriptor(target: target)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
         enc.label = "Mesh pass"
         enc.setRenderPipelineState(meshPipeline)
-        enc.setFragmentBuffer(meshUniformsBuffer, offset: 0, index: 0)
+        enc.setFragmentBuffer(uniformsBuffer, offset: 0, index: 0)
         enc.setFragmentBuffer(meshPointsBuffer, offset: 0, index: 1)
         enc.setFragmentTexture(input, index: 0)
         enc.setFragmentSamplerState(sampler, index: 0)
@@ -254,9 +266,7 @@ final class GradientRenderer {
         return pass
     }
 
-    /// Encode a no-op pass that just clears the target to black. Used to seed
-    /// the first ping-pong texture when the layer loop starts, so a non-Linear
-    /// first layer has a defined (black) input to sample from.
+    /// Encode a no-op pass that just clears the target to black.
     private func encodeClearPass(_ cb: MTLCommandBuffer, target: MTLTexture) {
         let pass = Self.makePassDescriptor(target: target)
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
@@ -282,8 +292,6 @@ final class GradientRenderer {
         guard let a = device.makeTexture(descriptor: desc),
               let b = device.makeTexture(descriptor: desc)
         else {
-            // Preserve the previous allocation on failure so the next encode doesn't
-            // crash; the frame will render with stale textures at worst.
             return (pingA ?? device.makeTexture(descriptor: desc)!,
                     pingB ?? device.makeTexture(descriptor: desc)!)
         }
@@ -294,11 +302,77 @@ final class GradientRenderer {
         return (a, b)
     }
 
-    // MARK: - Uniform helpers
+    // MARK: - Uniform buffer pools
+
+    private func linearBuffer(at idx: Int) -> MTLBuffer {
+        while linearUniformsBuffers.count <= idx {
+            let i = linearUniformsBuffers.count
+            let buf = device.makeBuffer(length: MemoryLayout<LinearUniforms>.stride,
+                                        options: .storageModeShared)!
+            buf.label = "LinearUniforms[\(i)]"
+            linearUniformsBuffers.append(buf)
+        }
+        return linearUniformsBuffers[idx]
+    }
+
+    private func waveBuffer(at idx: Int) -> MTLBuffer {
+        while waveUniformsBuffers.count <= idx {
+            let i = waveUniformsBuffers.count
+            let buf = device.makeBuffer(length: MemoryLayout<WaveUniforms>.stride,
+                                        options: .storageModeShared)!
+            buf.label = "WaveUniforms[\(i)]"
+            waveUniformsBuffers.append(buf)
+        }
+        return waveUniformsBuffers[idx]
+    }
+
+    private func meshBuffer(at idx: Int) -> MTLBuffer {
+        while meshUniformsBuffers.count <= idx {
+            let i = meshUniformsBuffers.count
+            let buf = device.makeBuffer(length: MemoryLayout<MeshUniforms>.stride,
+                                        options: .storageModeShared)!
+            buf.label = "MeshUniforms[\(i)]"
+            meshUniformsBuffers.append(buf)
+        }
+        return meshUniformsBuffers[idx]
+    }
+
+    private func meshPointsBuffer(at idx: Int) -> MTLBuffer {
+        while meshPointsBuffers.count <= idx {
+            let i = meshPointsBuffers.count
+            let bytes = MemoryLayout<MeshPoint>.stride * GradientRendererLimits.maxMeshPoints
+            let buf = device.makeBuffer(length: bytes, options: .storageModeShared)!
+            buf.label = "MeshPoints[\(i)]"
+            meshPointsBuffers.append(buf)
+        }
+        return meshPointsBuffers[idx]
+    }
+
+    private func glassBuffer(at idx: Int) -> MTLBuffer {
+        while glassUniformsBuffers.count <= idx {
+            let i = glassUniformsBuffers.count
+            let buf = device.makeBuffer(length: MemoryLayout<GlassUniforms>.stride,
+                                        options: .storageModeShared)!
+            buf.label = "GlassUniforms[\(i)]"
+            glassUniformsBuffers.append(buf)
+        }
+        return glassUniformsBuffers[idx]
+    }
+
+    // MARK: - Upload helpers
 
     private func uploadUniforms<T>(_ value: T, into buffer: MTLBuffer) {
         _ = withUnsafeBytes(of: value) { raw in
             memcpy(buffer.contents(), raw.baseAddress, raw.count)
+        }
+    }
+
+    private func uploadMeshPoints(_ points: [MeshPoint], into buffer: MTLBuffer) {
+        guard !points.isEmpty else { return }
+        _ = points.withUnsafeBufferPointer { ptr in
+            memcpy(buffer.contents(),
+                   ptr.baseAddress,
+                   MemoryLayout<MeshPoint>.stride * points.count)
         }
     }
 }
