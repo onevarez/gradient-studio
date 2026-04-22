@@ -33,8 +33,14 @@ enum PresetPasteboard {
         guard let data = text.data(using: .utf8) else {
             throw PresetError.notAPreset
         }
+        return try decode(from: data)
+    }
 
-        // First decode just the envelope to dispatch on schemaVersion.
+    /// Decode a preset from raw JSON bytes. Peeks at the envelope's
+    /// `schemaVersion` to dispatch between v1 (migrated via
+    /// `GradientPresetV1.upgraded()`) and v2 (current). Shared by the clipboard
+    /// paste path and the headless export's `GRADIENT_EXPORT_PRESET` path.
+    static func decode(from data: Data) throws -> GradientPreset {
         let envelope: Envelope
         do {
             envelope = try JSONDecoder().decode(Envelope.self, from: data)
@@ -80,7 +86,7 @@ enum PresetPasteboard {
 
     /// Minimal shape used to peek at the preset's kind and schemaVersion before
     /// choosing a full decoder.
-    private struct Envelope: Decodable {
+    fileprivate struct Envelope: Decodable {
         var kind: String
         var schemaVersion: Int
     }

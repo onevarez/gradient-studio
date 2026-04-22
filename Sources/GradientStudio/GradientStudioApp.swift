@@ -24,6 +24,22 @@ struct GradientStudioApp: App {
         let dur    = Double(env["GRADIENT_EXPORT_DURATION"] ?? "2") ?? 2
         let fps    = Int32(env["GRADIENT_EXPORT_FPS"]    ?? "30")   ?? 30
 
+        // Resolve which scene to render. Default to the app's random default;
+        // if GRADIENT_EXPORT_PRESET is set, load and apply that preset — lets
+        // the smoke-test harness pin a deterministic scene.
+        var params: RenderParams = .default
+        if let presetPath = env["GRADIENT_EXPORT_PRESET"], !presetPath.isEmpty {
+            do {
+                let data = try Data(contentsOf: URL(fileURLWithPath: presetPath))
+                let preset = try PresetPasteboard.decode(from: data)
+                try preset.apply(to: &params)
+                fputs("loaded preset: \(presetPath)\n", stderr)
+            } catch {
+                fputs("preset load failed: \(error.localizedDescription)\n", stderr)
+                exit(2)
+            }
+        }
+
         let settings = VideoExporter.Settings(
             width: width,
             height: height,
@@ -39,9 +55,10 @@ struct GradientStudioApp: App {
         let box = ErrorBox()
         let sem = DispatchSemaphore(value: 0)
 
+        let renderParams = params
         Task.detached {
             do {
-                try await VideoExporter.export(params: .default, settings: settings) { pct in
+                try await VideoExporter.export(params: renderParams, settings: settings) { pct in
                     if Int(pct * 100).isMultiple(of: 10) {
                         fputs(String(format: "export %.0f%%\n", pct * 100), stderr)
                     }

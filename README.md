@@ -51,6 +51,20 @@ GRADIENT_EXPORT_HEIGHT=1080 \
   .build/arm64-apple-macosx/debug/GradientStudio
 ```
 
+Pin a specific scene by pointing `GRADIENT_EXPORT_PRESET` at a v1 or v2 preset JSON (the same format `Copy Preset` produces):
+
+```sh
+GRADIENT_EXPORT_PATH=/tmp/out.mp4 \
+GRADIENT_EXPORT_PRESET=/path/to/preset.json \
+  .build/arm64-apple-macosx/debug/GradientStudio
+```
+
+There's a `Scripts/smoke-test.sh` wrapper that builds, renders a short clip, and checks the output was produced — a gross-regression catch for the renderer, shader compile, and export path. Drop `GRADIENT_EXPORT_PRESET` into the env to pin a scene for repeatable runs.
+
+```sh
+Scripts/smoke-test.sh
+```
+
 ## Releases
 
 Three paths produce a GitHub Release. All of them converge on `.github/workflows/release.yml`, which builds a universal `GradientStudio.app` on `macos-14`, zips it, and attaches it to a Release.
