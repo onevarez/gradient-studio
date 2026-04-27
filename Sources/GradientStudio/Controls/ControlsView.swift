@@ -119,6 +119,7 @@ struct LayerRow: View {
         case .wave:   WaveControls(params: waveParamsBinding)
         case .mesh:   MeshControls(params: meshParamsBinding)
         case .glass:  GlassControls(params: glassParamsBinding)
+        case .radial: RadialControls(params: radialParamsBinding)
         }
     }
 
@@ -222,6 +223,22 @@ struct LayerRow: View {
                 return GlassParams(enabled: false, aberration: 0, blurRadius: 0)
             },
             set: { entry.layer = .glass($0) }
+        )
+    }
+
+    private var radialParamsBinding: Binding<RadialParams> {
+        Binding(
+            get: {
+                if case .radial(let p) = entry.layer { return p }
+                return RadialParams(color: SIMD4(0, 0, 0, 1),
+                                    center: SIMD2(0.5, 0.5),
+                                    radius: 0.5,
+                                    falloff: 2,
+                                    intensity: 1,
+                                    driftSpeed: 0,
+                                    driftRadius: 0)
+            },
+            set: { entry.layer = .radial($0) }
         )
     }
 }

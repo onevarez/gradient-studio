@@ -63,14 +63,28 @@ enum Shaders {
         float _pad0;
     };
 
+    struct RadialUniforms {
+        float4 color;
+        float2 center;
+        float  radius;
+        float  falloff;
+        float  intensity;
+        float  driftSpeed;
+        float  driftRadius;
+        float  loopPhase;
+        float  loopDuration;
+        float  _pad0;
+    };
+
     struct PostFxUniforms {
         float2 resolution;
         float  loopPhase;
         float  grainAmount;
         float  vignetteAmount;
         int    loopFrames;
+        int    grainStyle;       // 0 film, 1 halftone-dots, 2 halftone-lines
+        float  grainScale;       // cell size in screen pixels (halftone modes)
         float  _pad0;
-        float  _pad1;
     };
 
     struct MeshPoint {
@@ -219,6 +233,37 @@ enum Shaders {
         return hash13(float3(px, t)) - 0.5;
     }
 
+    // Halftone dots: at each pixel, find the cell it lives in, take distance
+    // from cell center, and threshold by source luminance. Dot radius shrinks
+    // as luminance grows — bright areas → small dots, dark → large dots, like
+    // newspaper printing. `phase` jitters cell centers per loop frame to keep
+    // the pattern alive in animation without distracting strobe.
+    static float halftoneDots(float2 px, float lum, float scale, float phase, int loopFrames) {
+        float t = floor(phase * float(loopFrames));
+        // 1 px sub-cell jitter so static frames don't show a perfect grid.
+        float2 jitter = float2(hash13(float3(0.0, 0.0, t)) - 0.5,
+                               hash13(float3(1.0, 0.0, t)) - 0.5);
+        float2 cell = floor((px + jitter) / scale);
+        float2 cellCenter = cell * scale + 0.5 * scale;
+        float d = distance(px + jitter, cellCenter) / (0.5 * scale);  // 0 center, 1 edge
+        // Dot radius driven by inverse luminance — stays in 0..1.
+        float r = sqrt(saturate(1.0 - lum));
+        // Soft 1-px edge so dots anti-alias.
+        return smoothstep(r + 0.06, r - 0.06, d);  // 1 inside dot, 0 outside
+    }
+
+    // Halftone lines: same idea on a 1-D axis. Diagonal so it doesn't fight
+    // the typical horizontal/vertical of underlying gradients.
+    static float halftoneLines(float2 px, float lum, float scale, float phase, int loopFrames) {
+        float t = floor(phase * float(loopFrames));
+        float jitter = (hash13(float3(0.0, 1.0, t)) - 0.5) * scale * 0.2;
+        // 45° projection.
+        float u = (px.x + px.y + jitter) / scale;
+        float f = fract(u) - 0.5;        // -0.5..0.5 within a stripe
+        float r = sqrt(saturate(1.0 - lum)) * 0.5;
+        return smoothstep(r + 0.04, r - 0.04, abs(f));
+    }
+
     // ---- vertex (shared fullscreen triangle) ----
     struct VSOut {
         float4 position [[position]];
@@ -319,6 +364,34 @@ enum Shaders {
         return float4(color, 1.0);
     }
 
+    // ---- Radial: additive bloom over input ----
+    fragment float4 radialFragment(VSOut in [[stage_in]],
+                                    constant RadialUniforms& u [[buffer(0)]],
+                                    texture2d<float, access::sample> inputTex [[texture(0)]],
+                                    sampler s [[sampler(0)]])
+    {
+        float3 base = inputTex.sample(s, in.uv).rgb;
+
+        // Orbital drift of the bloom center: a small circle whose radius is
+        // `driftRadius`. Snap to integer cycles per loop so the animation
+        // returns to its starting position seamlessly.
+        float cycles = cyclesForRate(u.driftSpeed, u.loopDuration);
+        float a      = u.loopPhase * TAU * cycles;
+        float2 anim  = u.center + u.driftRadius * float2(cos(a), sin(a));
+
+        // Radial bell curve. Distance is normalized by `radius`; the smoothstep
+        // gives a soft edge, and `falloff` reshapes the curve from a wide halo
+        // (low exponent) to a tight hot-spot (high exponent).
+        float d = distance(in.uv, anim) / u.radius;
+        float t = pow(1.0 - smoothstep(0.0, 1.0, saturate(d)), max(u.falloff, 0.1));
+
+        // Additive blend so stacking radials over a darker base brightens it
+        // without flattening colors below — matches the "hero blur" aesthetic
+        // where the bloom *adds* light rather than overlaying it.
+        float3 bloom = u.color.rgb * (t * u.intensity);
+        return float4(base + bloom, 1.0);
+    }
+
     // ---- Post-fx: vignette + grain, writes to target ----
     fragment float4 postFxFragment(VSOut in [[stage_in]],
                                     constant PostFxUniforms& u [[buffer(0)]],
@@ -335,8 +408,23 @@ enum Shaders {
 
         if (u.grainAmount > 0.0) {
             float2 px = in.uv * u.resolution;
-            float  n  = grainNoise(px, u.loopPhase, u.loopFrames);
-            color += float3(n) * u.grainAmount;
+            if (u.grainStyle == 1) {
+                // Halftone dots: dot coverage drives toward black; we mix from
+                // the source color to black by `coverage * grainAmount` so the
+                // print pattern stays in-key with the underlying gradient.
+                float lum = dot(color, float3(0.2126, 0.7152, 0.0722));
+                float c   = halftoneDots(px, lum, max(u.grainScale, 1.0),
+                                          u.loopPhase, u.loopFrames);
+                color = mix(color, float3(0.0), c * u.grainAmount);
+            } else if (u.grainStyle == 2) {
+                float lum = dot(color, float3(0.2126, 0.7152, 0.0722));
+                float c   = halftoneLines(px, lum, max(u.grainScale, 1.0),
+                                           u.loopPhase, u.loopFrames);
+                color = mix(color, float3(0.0), c * u.grainAmount);
+            } else {
+                float n = grainNoise(px, u.loopPhase, u.loopFrames);
+                color += float3(n) * u.grainAmount;
+            }
         }
 
         return float4(color, 1.0);

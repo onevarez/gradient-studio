@@ -16,7 +16,7 @@ struct GradientPreset: Codable {
     var globals: GlobalsPreset
 
     struct LayerPreset: Codable {
-        var kind: String              // "linear" | "wave" | "mesh" | "glass"
+        var kind: String              // "linear" | "wave" | "mesh" | "glass" | "radial"
         var enabled: Bool
         var params: LayerParamsPreset
 
@@ -43,6 +43,8 @@ struct GradientPreset: Codable {
                 self.params = .mesh(try c.decode(MeshPresetParams.self, forKey: .params))
             case "glass":
                 self.params = .glass(try c.decode(GlassPresetParams.self, forKey: .params))
+            case "radial":
+                self.params = .radial(try c.decode(RadialPresetParams.self, forKey: .params))
             default:
                 throw PresetError.unknownLayerKind(kind)
             }
@@ -57,6 +59,7 @@ struct GradientPreset: Codable {
             case .wave(let p):   try c.encode(p, forKey: .params)
             case .mesh(let p):   try c.encode(p, forKey: .params)
             case .glass(let p):  try c.encode(p, forKey: .params)
+            case .radial(let p): try c.encode(p, forKey: .params)
             }
         }
     }
@@ -66,6 +69,7 @@ struct GradientPreset: Codable {
         case wave(WavePresetParams)
         case mesh(MeshPresetParams)
         case glass(GlassPresetParams)
+        case radial(RadialPresetParams)
     }
 
     struct LinearPresetParams: Codable {
@@ -100,10 +104,23 @@ struct GradientPreset: Codable {
         var blurRadius: Float
     }
 
+    struct RadialPresetParams: Codable {
+        var color: [Float]
+        var center: [Float]
+        var radius: Float
+        var falloff: Float
+        var intensity: Float
+        var driftSpeed: Float
+        var driftRadius: Float
+    }
+
     struct GlobalsPreset: Codable {
         var loopDuration: Float
         var grain: Float
         var vignette: Float
+        // Optional so older v2 presets (pre-halftone) still decode cleanly.
+        var grainStyle: String?       // "film" | "halftone-dots" | "halftone-lines"
+        var grainScale: Float?
     }
 }
 
@@ -123,7 +140,9 @@ extension GradientPreset {
         self.globals = GlobalsPreset(
             loopDuration: params.loopDuration,
             grain: params.grainAmount,
-            vignette: params.vignetteAmount
+            vignette: params.vignetteAmount,
+            grainStyle: Self.grainStyleString(params.globals.grainStyle),
+            grainScale: params.globals.grainScale
         )
     }
 
@@ -142,6 +161,8 @@ extension GradientPreset {
         params.loopDuration    = globals.loopDuration
         params.grainAmount     = globals.grain
         params.vignetteAmount  = globals.vignette
+        params.globals.grainStyle = Self.grainStyle(from: globals.grainStyle)
+        params.globals.grainScale = globals.grainScale ?? 8.0
     }
 
     private static func makeLayer(from p: LayerParamsPreset) throws -> Layer {
@@ -182,6 +203,17 @@ extension GradientPreset {
                 aberration: g.aberration,
                 blurRadius: g.blurRadius
             ))
+        case .radial(let r):
+            return .radial(RadialParams(
+                color: simd4(r.color),
+                center: SIMD2(scalar(r.center, 0, default: 0.5),
+                              scalar(r.center, 1, default: 0.5)),
+                radius: r.radius,
+                falloff: r.falloff,
+                intensity: r.intensity,
+                driftSpeed: r.driftSpeed,
+                driftRadius: r.driftRadius
+            ))
         }
     }
 
@@ -191,6 +223,7 @@ extension GradientPreset {
         case .wave:   return "wave"
         case .mesh:   return "mesh"
         case .glass:  return "glass"
+        case .radial: return "radial"
         }
     }
 
@@ -228,6 +261,16 @@ extension GradientPreset {
                 aberration: p.aberration,
                 blurRadius: p.blurRadius
             ))
+        case .radial(let p):
+            return .radial(RadialPresetParams(
+                color: floats(p.color),
+                center: [p.center.x, p.center.y],
+                radius: p.radius,
+                falloff: p.falloff,
+                intensity: p.intensity,
+                driftSpeed: p.driftSpeed,
+                driftRadius: p.driftRadius
+            ))
         }
     }
 
@@ -256,6 +299,22 @@ extension GradientPreset {
         case "blobs": return .blobs
         case "smoke": return .smoke
         default:      return .grid
+        }
+    }
+
+    fileprivate static func grainStyleString(_ s: GrainStyle) -> String {
+        switch s {
+        case .film:          return "film"
+        case .halftoneDots:  return "halftone-dots"
+        case .halftoneLines: return "halftone-lines"
+        }
+    }
+
+    fileprivate static func grainStyle(from s: String?) -> GrainStyle {
+        switch s {
+        case "halftone-dots":  return .halftoneDots
+        case "halftone-lines": return .halftoneLines
+        default:               return .film
         }
     }
 }

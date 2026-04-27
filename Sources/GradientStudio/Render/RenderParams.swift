@@ -44,14 +44,28 @@ struct GlassUniforms {
     var _pad0: Float = 0
 }
 
+struct RadialUniforms {
+    var color: SIMD4<Float>
+    var center: SIMD2<Float>
+    var radius: Float
+    var falloff: Float
+    var intensity: Float
+    var driftSpeed: Float
+    var driftRadius: Float
+    var loopPhase: Float
+    var loopDuration: Float
+    var _pad0: Float = 0
+}
+
 struct PostFxUniforms {
     var resolution: SIMD2<Float>
     var loopPhase: Float
     var grainAmount: Float
     var vignetteAmount: Float
     var loopFrames: Int32
+    var grainStyle: Int32
+    var grainScale: Float
     var _pad0: Float = 0
-    var _pad1: Float = 0
 }
 
 enum MeshStyle: Int32 {
@@ -210,6 +224,8 @@ struct RenderParams: Equatable {
             globals: Globals(
                 loopDuration: 6.0,
                 grainAmount: 0.06,
+                grainStyle: .film,
+                grainScale: 8.0,
                 vignetteAmount: 0.2
             )
         )
@@ -236,6 +252,14 @@ struct RenderParams: Equatable {
             case .mesh(var m):
                 m.applyColors(colors)
                 layers[i].layer = .mesh(m)
+            case .radial(var r):
+                // Brightest palette entry → bloom color; the bloom is the focal
+                // hot-spot, and luma is what makes it read as such.
+                let bright = colors.max(by: {
+                    MeshParams.relativeLuminance($0) < MeshParams.relativeLuminance($1)
+                }) ?? r.color
+                r.color = bright
+                layers[i].layer = .radial(r)
             case .wave, .glass:
                 break
             }
@@ -298,6 +322,21 @@ struct RenderParams: Equatable {
                 g.aberration = .random(in: 0...0.5)
                 g.blurRadius = .random(in: 0...0.3)
                 layers[i].layer = .glass(g)
+
+            case .radial(var r):
+                // Re-color from the brightest end of the shared palette so the
+                // bloom reads as the focal point against the linear backdrop.
+                let bright = palette.max(by: {
+                    MeshParams.relativeLuminance($0) < MeshParams.relativeLuminance($1)
+                }) ?? r.color
+                r.color = bright
+                r.center = SIMD2(.random(in: 0.25...0.75), .random(in: 0.3...0.8))
+                r.radius = .random(in: 0.3...0.8)
+                r.falloff = .random(in: 1.5...4.0)
+                r.intensity = .random(in: 0.6...1.4)
+                r.driftSpeed = Bool.random() ? 0 : .random(in: -0.4...0.4)
+                r.driftRadius = .random(in: 0...0.12)
+                layers[i].layer = .radial(r)
             }
         }
 
@@ -367,6 +406,22 @@ extension GlassParams {
     }
 }
 
+extension RadialParams {
+    func uniforms(loopPhase: Float, loopDuration: Float) -> RadialUniforms {
+        RadialUniforms(
+            color: color,
+            center: center,
+            radius: max(radius, 0.001),
+            falloff: max(falloff, 0.1),
+            intensity: intensity,
+            driftSpeed: driftSpeed,
+            driftRadius: driftRadius,
+            loopPhase: loopPhase,
+            loopDuration: max(loopDuration, 0.001)
+        )
+    }
+}
+
 extension Globals {
     func postFxUniforms(resolution: SIMD2<Float>,
                         loopPhase: Float,
@@ -377,7 +432,9 @@ extension Globals {
             loopPhase: loopPhase,
             grainAmount: grainAmount,
             vignetteAmount: vignetteAmount,
-            loopFrames: max(loopFrames, 1)
+            loopFrames: max(loopFrames, 1),
+            grainStyle: grainStyle.rawValue,
+            grainScale: max(grainScale, 1.0)
         )
     }
 }

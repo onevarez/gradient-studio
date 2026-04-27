@@ -33,12 +33,47 @@ struct GlassParams: Equatable {
     var blurRadius: Float             // 0..1
 }
 
+/// Soft circular bloom that adds onto the layer beneath it. Models the
+/// "hero blur" look — a single bright spot with smooth falloff, optionally
+/// drifting on a small orbit.
+struct RadialParams: Equatable {
+    var color: SIMD4<Float>           // bloom emission color
+    var center: SIMD2<Float>          // 0..1 normalized
+    var radius: Float                 // 0..1.5 (uv units)
+    var falloff: Float                // 0.5..6, exponent on the bell curve
+    var intensity: Float              // 0..2, brightness multiplier
+    var driftSpeed: Float             // rad/sec orbital drift of `center`
+    var driftRadius: Float            // 0..0.3, how far center wanders
+}
+
+/// Three flavors of grain. `film` is uncorrelated white noise (the original
+/// behavior). `halftoneDots` and `halftoneLines` mimic newspaper printing —
+/// at high `grainAmount` they read as a graphic texture, not photo noise,
+/// matching the "Japaneasy / Chaotic Gradients" aesthetic.
+enum GrainStyle: Int32, CaseIterable, Identifiable {
+    case film         = 0
+    case halftoneDots = 1
+    case halftoneLines = 2
+
+    var id: Int32 { rawValue }
+
+    var label: String {
+        switch self {
+        case .film:          return "Film"
+        case .halftoneDots:  return "Halftone Dots"
+        case .halftoneLines: return "Halftone Lines"
+        }
+    }
+}
+
 /// Scene-wide knobs that don't belong to any one layer. Post-fx (grain, vignette)
 /// live here because they're applied after the layer stack, and `loopDuration` is
 /// a time property of the scene as a whole.
 struct Globals: Equatable {
     var loopDuration: Float           // seconds, used to snap rates to integer cycles/loop
-    var grainAmount: Float            // 0..0.3
+    var grainAmount: Float            // 0..1 — at high values dominates the image (chaotic look)
+    var grainStyle: GrainStyle        // film vs. halftone variants
+    var grainScale: Float             // halftone cell size in screen pixels (4..40); ignored for film
     var vignetteAmount: Float         // 0..1
 }
 
@@ -48,6 +83,7 @@ enum Layer: Equatable {
     case wave(WaveParams)
     case mesh(MeshParams)
     case glass(GlassParams)
+    case radial(RadialParams)
 
     var kind: LayerKind {
         switch self {
@@ -55,6 +91,7 @@ enum Layer: Equatable {
         case .wave:   return .wave
         case .mesh:   return .mesh
         case .glass:  return .glass
+        case .radial: return .radial
         }
     }
 
@@ -65,7 +102,7 @@ enum Layer: Equatable {
 /// Value-typed tag for a layer's kind — used by the "+ Add Layer" menu and for
 /// kind-discriminated operations that don't need to crack open the params.
 enum LayerKind: String, CaseIterable, Identifiable {
-    case linear, wave, mesh, glass
+    case linear, wave, mesh, glass, radial
 
     var id: String { rawValue }
 
@@ -75,6 +112,7 @@ enum LayerKind: String, CaseIterable, Identifiable {
         case .wave:   return "Wave Distortion"
         case .mesh:   return "Mesh"
         case .glass:  return "Glass"
+        case .radial: return "Radial Bloom"
         }
     }
 
@@ -105,6 +143,16 @@ enum LayerKind: String, CaseIterable, Identifiable {
                 enabled: true,
                 aberration: 0.3,
                 blurRadius: 0.15
+            ))
+        case .radial:
+            return .radial(RadialParams(
+                color: SIMD4(1.0, 0.45, 0.1, 1.0),
+                center: SIMD2(0.5, 0.55),
+                radius: 0.55,
+                falloff: 2.2,
+                intensity: 1.0,
+                driftSpeed: 0.0,
+                driftRadius: 0.05
             ))
         }
     }

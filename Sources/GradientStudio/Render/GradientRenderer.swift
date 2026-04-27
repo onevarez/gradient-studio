@@ -33,6 +33,7 @@ final class GradientRenderer {
     private let wavePipeline: MTLRenderPipelineState
     private let meshPipeline: MTLRenderPipelineState
     private let glassPipeline: MTLRenderPipelineState
+    private let radialPipeline: MTLRenderPipelineState
     private let postFxPipeline: MTLRenderPipelineState
 
     private let sampler: MTLSamplerState
@@ -45,6 +46,7 @@ final class GradientRenderer {
     private var meshUniformsBuffers:   [MTLBuffer] = []
     private var meshPointsBuffers:     [MTLBuffer] = []
     private var glassUniformsBuffers:  [MTLBuffer] = []
+    private var radialUniformsBuffers: [MTLBuffer] = []
 
     private let postFxUniformsBuffer: MTLBuffer
 
@@ -89,6 +91,8 @@ final class GradientRenderer {
         self.meshPipeline    = try makePipeline(fragmentName: "meshFragment",
                                                 format: Self.intermediatePixelFormat)
         self.glassPipeline   = try makePipeline(fragmentName: "glassFragment",
+                                                format: Self.intermediatePixelFormat)
+        self.radialPipeline  = try makePipeline(fragmentName: "radialFragment",
                                                 format: Self.intermediatePixelFormat)
         self.postFxPipeline  = try makePipeline(fragmentName: "postFxFragment",
                                                 format: Self.pixelFormat)
@@ -146,6 +150,7 @@ final class GradientRenderer {
         var waveIdx   = 0
         var meshIdx   = 0
         var glassIdx  = 0
+        var radialIdx = 0
 
         for entry in params.layers where entry.enabled {
             switch entry.layer {
@@ -189,6 +194,17 @@ final class GradientRenderer {
                                 input: current,
                                 target: next)
                 glassIdx += 1
+
+            case .radial(let p):
+                let buf = radialBuffer(at: radialIdx)
+                uploadUniforms(p.uniforms(loopPhase: phase, loopDuration: duration),
+                               into: buf)
+                encodeInputPass(commandBuffer,
+                                pipeline: radialPipeline,
+                                uniformsBuffer: buf,
+                                input: current,
+                                target: next)
+                radialIdx += 1
             }
             swap(&current, &next)
         }
@@ -357,6 +373,17 @@ final class GradientRenderer {
             glassUniformsBuffers.append(buf)
         }
         return glassUniformsBuffers[idx]
+    }
+
+    private func radialBuffer(at idx: Int) -> MTLBuffer {
+        while radialUniformsBuffers.count <= idx {
+            let i = radialUniformsBuffers.count
+            let buf = device.makeBuffer(length: MemoryLayout<RadialUniforms>.stride,
+                                        options: .storageModeShared)!
+            buf.label = "RadialUniforms[\(i)]"
+            radialUniformsBuffers.append(buf)
+        }
+        return radialUniformsBuffers[idx]
     }
 
     // MARK: - Upload helpers
